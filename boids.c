@@ -6,7 +6,10 @@
 #define RAYGUI_IMPLEMENTATION
 #include "raygui.h"
 
-const int N = 500;
+#define SCREEN_WIDTH 1920
+#define SCREEN_HEIGHT 1080
+#define N 800
+
 float avoid_factor = 1.0f;
 float centering_factor = 1.0f;
 float matching_factor = 1.0f;
@@ -19,63 +22,165 @@ typedef struct {
     Vector2 v1, v2, v3;
     float angle_deg;
     float size;
-    Vector2 pc;
 } Boid;
+
+typedef struct {
+    Boid **data;
+    int count;
+    int capacity;
+} BoidList;
+
+typedef struct {
+    Vector2 pos_sum;
+    int count;
+} CohesionData;
+
+typedef struct {
+    Boid *self;
+    Vector2 repulsion;
+} SeparationData;
+
+typedef struct {
+    Boid *self;
+    Vector2 vel_sum;
+    int count;
+} AlignmentData;
+
+BoidList **grid = NULL;
+int rows, cols;
+
+void init_grid(int screen_width, int screen_height, float visual_range) {
+    rows = (int)ceilf(screen_height / visual_range);
+    cols = (int)ceilf(screen_width / visual_range);
+
+    grid = malloc(rows * sizeof(BoidList*));
+    for (int i = 0; i < rows; i++) {
+        grid[i] = malloc(cols * sizeof(BoidList));
+
+        for (int j = 0; j < cols; j++) {
+            grid[i][j].count = 0;
+            grid[i][j].data = NULL;
+            grid[i][j].capacity = 0;
+        }
+    }
+}
+
+void free_grid() {
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            free(grid[i][j].data);
+        }
+        free(grid[i]);
+    }
+    free(grid);
+    grid = NULL;
+}
+
+void boidlist_add(BoidList *list, Boid *b) {
+    if (list->count == list->capacity) {
+        int new_capacity = list->capacity == 0 ? 4 : list->capacity * 2;
+        list->data = realloc(list->data, new_capacity * sizeof(Boid*));
+        list->capacity = new_capacity;
+    }
+    list->data[list->count++] = b;
+}
+
+void add_boid_to_grid(Boid *b) {
+    int row = (int)(b->pos.y / visual_range);
+    int col = (int)(b->pos.x / visual_range);
+
+    if (row < 0) row = 0;
+    if (row >= rows) row = rows - 1;
+    if (col < 0) col = 0;
+    if (col >= cols) col = cols - 1;
+
+    boidlist_add(&grid[row][col], b);
+}
+
+void clear_grid() {
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            free(grid[i][j].data);
+            grid[i][j].count = 0;
+            grid[i][j].capacity = 0;
+            grid[i][j].data = NULL;
+        }
+    }
+}
+
+void for_neighbors(Boid *b, void (*callback)(Boid *neighbor, void *user_data), void *user_data) {
+    int row = (int)(b->pos.y / visual_range);
+    int col = (int)(b->pos.x / visual_range);
+
+    for (int i = row - 1; i <= row + 1; i++) {
+        if (i < 0 || i >= rows) continue;
+        for (int j = col - 1; j <= col + 1; j++) {
+            if (j < 0 || j >= cols) continue;
+            BoidList *cell = &grid[i][j];
+            for (int k = 0; k < cell->count; k++) {
+                Boid *neighbor = cell->data[k];
+                if (neighbor != b) callback(neighbor, user_data);
+            }
+        }
+    }
+}
 
 Vector2 vector2divide(Vector2 v1, float v) {
     return (Vector2){ v1.x / v, v1.y / v };
 }
 
-Vector2 cohesion(Boid *boids, Boid b) {
-    Vector2 pos_avg = Vector2Zero();
-    int neighboring_boids = 0;
-    for (int i = 0; i < N; i++) {
-        if (Vector2Equals(b.pos, boids[i].pos)) continue;
-        
-        float dist = Vector2Distance(b.pos, boids[i].pos);
-        if (dist < visual_range) {
-            pos_avg = Vector2Add(pos_avg, boids[i].pos);
-            neighboring_boids++;
-        }
-    }
-
-    if (neighboring_boids > 0)
-        pos_avg = vector2divide(pos_avg, neighboring_boids);
-
-    return Vector2Subtract(pos_avg, b.pos);
+void cohesion_callback(Boid *neighbor, void *user_data) {
+    CohesionData *data = (CohesionData *)user_data;
+    data->pos_sum = Vector2Add(data->pos_sum, neighbor->pos);
+    data->count++;
 }
 
-Vector2 separation(Boid b, Boid *boids) {
-    Vector2 close = Vector2Zero();
-    for (int i = 0; i < N; i++) {
-        if (Vector2Equals(b.pos, boids[i].pos)) continue;
+Vector2 cohesion(Boid *b) {
+    CohesionData data = { Vector2Zero(), 0 };
+    for_neighbors(b, cohesion_callback, &data);
 
-        float dist_sq = Vector2DistanceSqr(b.pos, boids[i].pos);
-        if (dist_sq < protected_range * protected_range) {
-            Vector2 diff = Vector2Subtract(b.pos, boids[i].pos);
-            close = Vector2Add(close, diff);
-        }
-    }
-    return close;
+    if (data.count == 0) return Vector2Zero();
+    Vector2 avg = vector2divide(data.pos_sum, data.count);
+    
+    return Vector2Subtract(avg, b->pos);
 }
 
-Vector2 alignment(Boid b, Boid *boids) {
-    Vector2 vel_avg = Vector2Zero();
-    int neighboring_boids = 0;
-    for (int i = 0; i < N; i++) {
-        if (Vector2Equals(b.pos, boids[i].pos)) continue;
-
-        float dist = Vector2Distance(b.pos, boids[i].pos);
-        if (dist < visual_range) {
-            vel_avg = Vector2Add(vel_avg, boids[i].vel);
-            neighboring_boids++;
-        }
+void separation_callback(Boid *neighbor, void *user_data) {
+    SeparationData *data = (SeparationData *)user_data;
+    
+    if (Vector2Equals(data->self->pos, neighbor->pos)) return;
+    float dist_sq = Vector2DistanceSqr(data->self->pos, neighbor->pos);
+    if (dist_sq < protected_range * protected_range) {
+        Vector2 diff = Vector2Subtract(data->self->pos, neighbor->pos);
+        data->repulsion = Vector2Add(data->repulsion, diff);
     }
+}
 
-    if (neighboring_boids > 0) 
-        vel_avg = vector2divide(vel_avg, neighboring_boids);
+Vector2 separation(Boid *b) {
+    SeparationData data = { b, Vector2Zero() };
+    for_neighbors(b, separation_callback, &data);
+    return data.repulsion;
+}
 
-    return Vector2Subtract(vel_avg, b.vel);
+void alignment_callback(Boid *neighbor, void *user_data) {
+    AlignmentData *data = (AlignmentData *)user_data;
+    
+    if (Vector2Equals(data->self->pos, neighbor->pos)) return;
+    float dist = Vector2Distance(data->self->pos, neighbor->pos);
+    if (dist < visual_range) {
+        data->vel_sum = Vector2Add(data->vel_sum, neighbor->vel);
+        data->count++;
+    }
+}
+
+Vector2 alignment(Boid *b) {
+    AlignmentData data = { b, Vector2Zero(), 0 };
+    for_neighbors(b, alignment_callback, &data);
+    
+    if (data.count == 0) return Vector2Zero();
+    data.vel_sum = vector2divide(data.vel_sum, data.count);
+
+    return Vector2Subtract(data.vel_sum, b->vel);
 }
 
 float lerp_angle(float a, float b, float t) {
@@ -104,9 +209,9 @@ void bound_position(Boid *b) {
     float turn_strengh = 80.0f;
 
     if (b->pos.x < margin) b->vel.x += (margin - b->pos.x) / margin * turn_strengh;
-    else if (b->pos.x > 1920 - margin) b->vel.x -= (b->pos.x - (1920 - margin)) / margin * turn_strengh;
+    else if (b->pos.x > SCREEN_WIDTH - margin) b->vel.x -= (b->pos.x - (SCREEN_WIDTH - margin)) / margin * turn_strengh;
     if (b->pos.y < margin) b->vel.y += (margin - b->pos.y) / margin * turn_strengh;
-    else if (b->pos.y > 1080 - margin) b->vel.y -= (b->pos.y - (1080 - margin)) / margin * turn_strengh;
+    else if (b->pos.y > SCREEN_HEIGHT - margin) b->vel.y -= (b->pos.y - (SCREEN_HEIGHT - margin)) / margin * turn_strengh;
 }
 
 void rotate_point(Vector2 *point, Vector2 center, float angle_deg) {
@@ -121,10 +226,10 @@ void rotate_point(Vector2 *point, Vector2 center, float angle_deg) {
     *point = Vector2Add(rotated, center);
 }
 
-void update_boid(Boid *b, float dt, Boid *boids) {
-    Vector2 separation_force = Vector2Scale(separation(*b, boids), avoid_factor);
-    Vector2 cohesion_force = Vector2Scale(cohesion(boids, *b), centering_factor);
-    Vector2 alignment_force = Vector2Scale(alignment(*b, boids), matching_factor);
+void update_boid(Boid *b, float dt) {
+    Vector2 separation_force = Vector2Scale(separation(b), avoid_factor);
+    Vector2 cohesion_force = Vector2Scale(cohesion(b), centering_factor);
+    Vector2 alignment_force = Vector2Scale(alignment(b), matching_factor);
    
     Vector2 desired_vel = b->vel;
     desired_vel = Vector2Add(desired_vel, alignment_force);
@@ -159,10 +264,10 @@ void draw_boid(Boid b) {
 }
 
 void draw_borders() {
-    DrawLineV((Vector2){0, 0}, (Vector2){1920, 0}, BLACK);
-    DrawLineV((Vector2){0, 0}, (Vector2){0, 1080}, BLACK);
-    DrawLineV((Vector2){1920, 0}, (Vector2){1920, 1080}, BLACK);
-    DrawLineV((Vector2){0, 1080}, (Vector2){1920, 1080}, BLACK);
+    DrawLineV((Vector2){0, 0}, (Vector2){SCREEN_WIDTH, 0}, BLACK);
+    DrawLineV((Vector2){0, 0}, (Vector2){0, SCREEN_HEIGHT}, BLACK);
+    DrawLineV((Vector2){SCREEN_WIDTH, 0}, (Vector2){SCREEN_WIDTH, SCREEN_HEIGHT}, BLACK);
+    DrawLineV((Vector2){0, SCREEN_HEIGHT}, (Vector2){SCREEN_WIDTH, SCREEN_HEIGHT}, BLACK);
 }
 
 void handle_controls(Camera2D *camera) {
@@ -199,7 +304,7 @@ void draw_controls() {
 }
 
 int main() {
-    InitWindow(1920, 1080, "Boids Simulation");
+    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Boids Simulation");
 
     Boid *boids = (Boid *)malloc(N * sizeof(Boid));
 
@@ -211,9 +316,14 @@ int main() {
     camera.zoom = 0.8f;
     camera.target = (Vector2){ GetScreenWidth() / 2.0f, GetScreenHeight() / 2.0f };
     camera.offset = (Vector2){ GetScreenWidth() / 2.0f, GetScreenHeight() / 2.0f };
+
+    init_grid(SCREEN_WIDTH, SCREEN_HEIGHT, visual_range);
     
     while (!WindowShouldClose()) {
-
+        clear_grid();
+        for (int i = 0; i < N; i++) {
+            add_boid_to_grid(&boids[i]);
+        }
         float dt = GetFrameTime();
 
         handle_controls(&camera);
@@ -223,7 +333,7 @@ int main() {
         BeginMode2D(camera);
 
         for (int i = 0; i < N; i++) {
-            update_boid(&boids[i], dt, boids);
+            update_boid(&boids[i], dt);
             draw_boid(boids[i]);
         }
 

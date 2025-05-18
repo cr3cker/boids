@@ -6,7 +6,7 @@ CFLAGS  = -Wall -Wextra
 
 ifeq ($(UNAME_S),Linux)
     CC      = gcc
-    LDFLAGS = -lraylib -lGL -lm -lpthread -ldl -lrt -lX11
+    LDFLAGS = -lraylib -lGL -lm -lpthread -ldl -lrt -lX11 -g
 endif
 
 ifeq ($(OS),Windows_NT)
