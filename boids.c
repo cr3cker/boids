@@ -1,0 +1,239 @@
+#include <math.h>
+#include <raylib.h>
+#include <raymath.h>
+#include <stdlib.h>
+
+#define RAYGUI_IMPLEMENTATION
+#include "raygui.h"
+
+const int N = 500;
+float avoid_factor = 1.0f;
+float centering_factor = 1.0f;
+float matching_factor = 1.0f;
+float visual_range = 75.0f;
+float protected_range = 20.0f;
+
+typedef struct {
+    Vector2 pos;
+    Vector2 vel;
+    Vector2 v1, v2, v3;
+    float angle_deg;
+    float size;
+    Vector2 pc;
+} Boid;
+
+Vector2 vector2divide(Vector2 v1, float v) {
+    return (Vector2){ v1.x / v, v1.y / v };
+}
+
+Vector2 cohesion(Boid *boids, Boid b) {
+    Vector2 pos_avg = Vector2Zero();
+    int neighboring_boids = 0;
+    for (int i = 0; i < N; i++) {
+        if (Vector2Equals(b.pos, boids[i].pos)) continue;
+        
+        float dist = Vector2Distance(b.pos, boids[i].pos);
+        if (dist < visual_range) {
+            pos_avg = Vector2Add(pos_avg, boids[i].pos);
+            neighboring_boids++;
+        }
+    }
+
+    if (neighboring_boids > 0)
+        pos_avg = vector2divide(pos_avg, neighboring_boids);
+
+    return Vector2Subtract(pos_avg, b.pos);
+}
+
+Vector2 separation(Boid b, Boid *boids) {
+    Vector2 close = Vector2Zero();
+    for (int i = 0; i < N; i++) {
+        if (Vector2Equals(b.pos, boids[i].pos)) continue;
+
+        float dist_sq = Vector2DistanceSqr(b.pos, boids[i].pos);
+        if (dist_sq < protected_range * protected_range) {
+            Vector2 diff = Vector2Subtract(b.pos, boids[i].pos);
+            close = Vector2Add(close, diff);
+        }
+    }
+    return close;
+}
+
+Vector2 alignment(Boid b, Boid *boids) {
+    Vector2 vel_avg = Vector2Zero();
+    int neighboring_boids = 0;
+    for (int i = 0; i < N; i++) {
+        if (Vector2Equals(b.pos, boids[i].pos)) continue;
+
+        float dist = Vector2Distance(b.pos, boids[i].pos);
+        if (dist < visual_range) {
+            vel_avg = Vector2Add(vel_avg, boids[i].vel);
+            neighboring_boids++;
+        }
+    }
+
+    if (neighboring_boids > 0) 
+        vel_avg = vector2divide(vel_avg, neighboring_boids);
+
+    return Vector2Subtract(vel_avg, b.vel);
+}
+
+float lerp_angle(float a, float b, float t) {
+    float diff = fmodf(b - a + 360.0f, 360.0f);
+    if (diff > 180.0f) diff -= 360;
+    return fmodf(a + diff * t + 360.0f, 360.0f);
+}
+
+Boid new_boid() {
+    Vector2 pos = { GetRandomValue(0, GetScreenWidth()), GetRandomValue(0, GetScreenHeight()) };
+    int sign_x = GetRandomValue(0, 1) ? 1 : -1;
+    int sign_y = GetRandomValue(0, 1) ? 1 : -1;
+    Vector2 vel = { GetRandomValue(80, 160) * sign_x , GetRandomValue(80, 160) * sign_y };
+    float size = 15;
+    Boid b = {
+        .pos = pos,
+        .vel = vel,
+        .angle_deg = 0.0f,
+        .size = size
+    };
+    return b;
+}
+
+void bound_position(Boid *b) {
+    float margin = 100.0f;
+    float turn_strengh = 80.0f;
+
+    if (b->pos.x < margin) b->vel.x += (margin - b->pos.x) / margin * turn_strengh;
+    else if (b->pos.x > 1920 - margin) b->vel.x -= (b->pos.x - (1920 - margin)) / margin * turn_strengh;
+    if (b->pos.y < margin) b->vel.y += (margin - b->pos.y) / margin * turn_strengh;
+    else if (b->pos.y > 1080 - margin) b->vel.y -= (b->pos.y - (1080 - margin)) / margin * turn_strengh;
+}
+
+void rotate_point(Vector2 *point, Vector2 center, float angle_deg) {
+    float rad = angle_deg * DEG2RAD;
+    Vector2 rel = Vector2Subtract(*point, center);
+    float sin_a = sinf(rad);
+    float cos_a = cosf(rad); 
+    Vector2 rotated = {
+        cos_a * rel.x - rel.y * sin_a,
+        sin_a * rel.x + rel.y * cos_a
+    };
+    *point = Vector2Add(rotated, center);
+}
+
+void update_boid(Boid *b, float dt, Boid *boids) {
+    Vector2 separation_force = Vector2Scale(separation(*b, boids), avoid_factor);
+    Vector2 cohesion_force = Vector2Scale(cohesion(boids, *b), centering_factor);
+    Vector2 alignment_force = Vector2Scale(alignment(*b, boids), matching_factor);
+   
+    Vector2 desired_vel = b->vel;
+    desired_vel = Vector2Add(desired_vel, alignment_force);
+    desired_vel = Vector2Add(desired_vel, cohesion_force);
+    desired_vel = Vector2Add(desired_vel, separation_force);
+
+    b->vel = Vector2Lerp(b->vel, desired_vel, 0.1f);
+
+    float max_speed = 400.0f;
+    if (Vector2Length(b->vel) > max_speed) {
+        b->vel = Vector2Scale(Vector2Normalize(b->vel), max_speed);
+    }
+
+    b->pos = Vector2Add(b->pos, Vector2Scale(b->vel, dt));
+    bound_position(b);
+    float target_angle = atan2f(b->vel.y, b->vel.x) * RAD2DEG;
+
+    b->angle_deg = lerp_angle(b->angle_deg, target_angle, 3.0f * dt);
+
+    float s = b->size;
+    b->v1 = (Vector2){ b->pos.x + s / 2.0f, b->pos.y };
+    b->v2 = (Vector2){ b->pos.x - s / 2.0f, b->pos.y - s / 3.0f };
+    b->v3 = (Vector2){ b->pos.x - s / 2.0f, b->pos.y + s / 3.0f };
+
+    rotate_point(&b->v1, b->pos, b->angle_deg);
+    rotate_point(&b->v2, b->pos, b->angle_deg);
+    rotate_point(&b->v3, b->pos, b->angle_deg);
+}
+
+void draw_boid(Boid b) {
+    DrawTriangle(b.v1, b.v2, b.v3, RED);
+}
+
+void draw_borders() {
+    DrawLineV((Vector2){0, 0}, (Vector2){1920, 0}, BLACK);
+    DrawLineV((Vector2){0, 0}, (Vector2){0, 1080}, BLACK);
+    DrawLineV((Vector2){1920, 0}, (Vector2){1920, 1080}, BLACK);
+    DrawLineV((Vector2){0, 1080}, (Vector2){1920, 1080}, BLACK);
+}
+
+void handle_controls(Camera2D *camera) {
+    camera->zoom = expf(logf(camera->zoom) + ((float)GetMouseWheelMove()*0.1f));
+
+    if (camera->zoom > 3.0f) camera->zoom = 3.0f;
+    else if (camera->zoom < 0.1f) camera->zoom = 0.1f;
+
+    if (IsKeyPressed(KEY_R)) {
+        camera->zoom = 0.8f;
+        camera->offset = (Vector2){ GetScreenWidth() / 2.0f, GetScreenHeight() / 2.0f };
+    }
+
+    if (IsKeyDown(KEY_W)) camera->offset.y += 10;
+    if (IsKeyDown(KEY_S)) camera->offset.y -= 10;
+    if (IsKeyDown(KEY_A)) camera->offset.x += 10;
+    if (IsKeyDown(KEY_D)) camera->offset.x -= 10;
+}
+
+void draw_controls() {
+    int x = 100;
+    int y = 20;
+    int spacing = 30;
+
+    GuiSliderBar((Rectangle){ x, y, 200, 20 }, "Avoid Factor", TextFormat("%.2f", avoid_factor), &avoid_factor, 0.0f, 5.0f);
+    y += spacing;
+    GuiSliderBar((Rectangle){ x, y, 200, 20 }, "Centering Factor", TextFormat("%.2f", centering_factor), &centering_factor, 0.0f, 5.0f);
+    y += spacing;
+    GuiSliderBar((Rectangle){ x, y, 200, 20 }, "Matching Factor", TextFormat("%.2f", matching_factor), &matching_factor, 0.0f, 5.0f);
+    y += spacing;
+    GuiSliderBar((Rectangle){ x, y, 200, 20 }, "Visual Range", TextFormat("%.0f", visual_range), &visual_range, 10.0f, 300.0f);
+    y += spacing;
+    GuiSliderBar((Rectangle){ x, y, 200, 20 }, "Protected Range", TextFormat("%.0f", protected_range), &protected_range, 5.0f, 100.0f);
+}
+
+int main() {
+    InitWindow(1920, 1080, "Boids Simulation");
+
+    Boid *boids = (Boid *)malloc(N * sizeof(Boid));
+
+    for (int i = 0; i < N; i++) {
+        boids[i] = new_boid();
+    }
+
+    Camera2D camera = { 0 };
+    camera.zoom = 0.8f;
+    camera.target = (Vector2){ GetScreenWidth() / 2.0f, GetScreenHeight() / 2.0f };
+    camera.offset = (Vector2){ GetScreenWidth() / 2.0f, GetScreenHeight() / 2.0f };
+    
+    while (!WindowShouldClose()) {
+
+        float dt = GetFrameTime();
+
+        handle_controls(&camera);
+
+        BeginDrawing();
+        ClearBackground(RAYWHITE);
+        BeginMode2D(camera);
+
+        for (int i = 0; i < N; i++) {
+            update_boid(&boids[i], dt, boids);
+            draw_boid(boids[i]);
+        }
+
+        draw_borders();
+
+        EndMode2D();
+        draw_controls();
+        EndDrawing();
+    }
+    free(boids);
+    CloseWindow();
+    return 0;
+}
