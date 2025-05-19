@@ -344,6 +344,7 @@ int main() {
         EndDrawing();
     }
     free(boids);
+    free_grid();
     CloseWindow();
     return 0;
 }
