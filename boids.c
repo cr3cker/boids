@@ -8,7 +8,7 @@
 
 #define SCREEN_WIDTH 1920
 #define SCREEN_HEIGHT 1080
-#define N 800
+#define N 500
 
 float avoid_factor = 1.0f;
 float centering_factor = 1.0f;
